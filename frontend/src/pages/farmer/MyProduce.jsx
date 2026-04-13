@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Plus, Trash2, Package } from 'lucide-react';
+import { Plus, Trash2, Package, CalendarDays, Thermometer } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { useAppData } from '../../context/AppDataContext';
 import { Modal } from '../../components/ui/Modal';
@@ -101,69 +101,92 @@ export default function MyProduce() {
   return (
     <div>
       <Topbar title="My Produce" />
-      <div className="p-6">
-        <div className="flex justify-between items-center mb-6">
-          <h2 className="text-lg font-semibold">Your Produce List</h2>
-          <button onClick={() => setIsModalOpen(true)} className="flex items-center gap-2 px-4 py-2 bg-green text-white rounded-lg hover:bg-green-dark">
-            <Plus className="w-4 h-4" /> Add Produce
-          </button>
-        </div>
+      <div className="p-6 space-y-6">
+        <section className="rounded-[2rem] border border-gray-100 bg-white p-6 shadow-sm">
+          <div className="flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
+            <div className="max-w-2xl">
+              <p className="text-sm font-semibold uppercase tracking-[0.18em] text-green">Inventory workspace</p>
+              <h2 className="mt-2 text-2xl font-bold text-forest sm:text-3xl">Manage your produce like a proper operation.</h2>
+              <p className="mt-3 text-base leading-7 text-slate">
+                Add new stock, review storage tips, and keep visible control over the produce you have ready for sale.
+              </p>
+            </div>
+            <button onClick={() => setIsModalOpen(true)} className="inline-flex items-center gap-2 rounded-full bg-green px-5 py-3 text-sm font-semibold text-white shadow-[0_14px_28px_rgba(39,174,96,0.2)] transition hover:-translate-y-0.5 hover:bg-green-dark">
+              <Plus className="w-4 h-4" /> Add Produce
+            </button>
+          </div>
+          <div className="mt-6 grid gap-4 md:grid-cols-2">
+            {[
+              { label: 'Listed items', value: myProducts.length },
+              { label: 'Latest status', value: myProducts.length ? 'Active inventory' : 'No items yet' },
+            ].map((item) => (
+              <div key={item.label} className="rounded-2xl bg-ivory p-4">
+                <p className="text-xs uppercase tracking-[0.18em] text-slate">{item.label}</p>
+                <p className="mt-2 text-2xl font-bold text-forest">{item.value}</p>
+              </div>
+            ))}
+          </div>
+        </section>
 
         {myProducts.length === 0 ? (
           <EmptyState icon={Package} message="No produce listed yet. Add your first produce!" />
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full">
-              <thead>
-                <tr className="border-b">
-                  <th className="text-left p-3 font-semibold text-gray-600">Image</th>
-                  <th className="text-left p-3 font-semibold text-gray-600">Name</th>
-                  <th className="text-left p-3 font-semibold text-gray-600">Harvest Date</th>
-                  <th className="text-left p-3 font-semibold text-gray-600">Available</th>
-                  <th className="text-left p-3 font-semibold text-gray-600">Price</th>
-                  <th className="text-left p-3 font-semibold text-gray-600">Status</th>
-                  <th className="text-left p-3 font-semibold text-gray-600">Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {myProducts.map((p, idx) => (
-                  <tr key={p.id} className={`border-b ${idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'}`}>
-                    <td className="p-3">
-                      {p.imageUrl ? (
-                        <img src={p.imageUrl} alt={p.name} className="w-12 h-12 object-cover rounded-lg" />
-                      ) : (
-                        <span className="text-2xl">{p.name?.[0] || '🌿'}</span>
-                      )}
-                    </td>
-                    <td className="p-3 font-medium">{p.name}</td>
-                    <td className="p-3">{p.harvestDate || '-'}</td>
-                    <td className="p-3">{p.availableQuantity ?? p.quantity} {p.unit}</td>
-                    <td className="p-3">৳{p.price}/{p.unit}</td>
-                    <td className="p-3">
-                      {(() => {
-                        const normalizedStatus = String(p.status || 'available').toLowerCase();
-                        const displayStatus = normalizedStatus === 'reserved' ? 'available' : normalizedStatus;
+          <div className="grid gap-5 md:grid-cols-2 xl:grid-cols-3">
+            {myProducts.map((product) => {
+              const normalizedStatus = String(product.status || 'available').toLowerCase();
+              const displayStatus = normalizedStatus === 'reserved' ? 'available' : normalizedStatus;
 
-                        return (
-                      <span className={`px-2 py-1 rounded-full text-xs font-medium ${
-                        displayStatus === 'available'
-                          ? 'bg-green-100 text-green-800'
-                          : displayStatus === 'sold'
-                            ? 'bg-red-100 text-red-700'
-                            : 'bg-gray-100 text-gray-800'
-                      }`}>
-                        {displayStatus === 'sold' ? 'Sold Out' : displayStatus}
-                      </span>
-                        );
-                      })()}
-                    </td>
-                    <td className="p-3">
-                      <button onClick={() => handleDelete(p.id)} className="p-2 text-red-500 hover:bg-red-50 rounded-lg"><Trash2 className="w-4 h-4" /></button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+              return (
+                <article key={product.id} className="overflow-hidden rounded-[1.75rem] border border-gray-100 bg-white shadow-sm transition hover:-translate-y-1 hover:shadow-lg">
+                  <div className="relative h-48 bg-ivory">
+                    {product.imageUrl ? (
+                      <img src={product.imageUrl} alt={product.name} className="h-full w-full object-cover" />
+                    ) : (
+                      <div className="flex h-full items-center justify-center text-6xl">{product.name?.[0] || '🌿'}</div>
+                    )}
+                    <div className="absolute left-4 top-4 rounded-full bg-white/90 px-3 py-1 text-xs font-semibold text-forest shadow-sm backdrop-blur">
+                      {displayStatus === 'sold' ? 'Sold Out' : displayStatus}
+                    </div>
+                  </div>
+
+                  <div className="space-y-4 p-5">
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <h3 className="text-xl font-bold text-forest">{product.name}</h3>
+                        <p className="mt-1 text-sm text-slate">{product.category || 'Category not set'}</p>
+                      </div>
+                      <button onClick={() => handleDelete(product.id)} className="rounded-full border border-red-100 p-2 text-red-500 transition hover:bg-red-50" aria-label={`Delete ${product.name}`}>
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </div>
+
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <div className="rounded-2xl bg-ivory p-3">
+                        <p className="flex items-center gap-1 text-xs uppercase tracking-[0.18em] text-slate"><CalendarDays className="h-3.5 w-3.5" /> Harvest</p>
+                        <p className="mt-2 text-sm font-semibold text-forest">{product.harvestDate || '-'}</p>
+                      </div>
+                      <div className="rounded-2xl bg-ivory p-3">
+                        <p className="flex items-center gap-1 text-xs uppercase tracking-[0.18em] text-slate"><Thermometer className="h-3.5 w-3.5" /> Storage</p>
+                        <p className="mt-2 text-sm font-semibold text-forest">{product.storageTemp || 'N/A'}</p>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center justify-between rounded-2xl bg-forest px-4 py-3 text-white">
+                      <div>
+                        <p className="text-xs uppercase tracking-[0.18em] text-white/70">Available</p>
+                        <p className="text-sm font-semibold">{product.availableQuantity ?? product.quantity} {product.unit}</p>
+                      </div>
+                      <div className="text-right">
+                        <p className="text-xs uppercase tracking-[0.18em] text-white/70">Price</p>
+                        <p className="text-sm font-semibold">৳{product.price}/{product.unit}</p>
+                      </div>
+                    </div>
+
+                    {product.shortDescription && <p className="text-sm leading-6 text-slate">{product.shortDescription}</p>}
+                  </div>
+                </article>
+              );
+            })}
           </div>
         )}
       </div>

@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Plus, Truck } from 'lucide-react';
+import { Plus, Truck, MapPin, Route, Clock3 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { useAppData } from '../../context/AppDataContext';
 import { Modal } from '../../components/ui/Modal';
@@ -106,51 +106,87 @@ export default function TransportRequests() {
   return (
     <div>
       <Topbar title="Transport Requests" />
-      <div className="p-6">
-        <div className="flex justify-between items-center mb-6">
-          <h2 className="text-lg font-semibold">My Transport Requests</h2>
-          <button onClick={() => setIsModalOpen(true)} className="flex items-center gap-2 px-4 py-2 bg-green text-white rounded-lg hover:bg-green-dark">
-            <Plus className="w-4 h-4" /> Request Transport
-          </button>
-        </div>
+      <div className="p-6 space-y-6">
+        <section className="rounded-[2rem] border border-gray-100 bg-white p-6 shadow-sm">
+          <div className="flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
+            <div className="max-w-2xl">
+              <p className="text-sm font-semibold uppercase tracking-[0.18em] text-green">Transport workspace</p>
+              <h2 className="mt-2 text-2xl font-bold text-forest sm:text-3xl">Keep your deliveries organized and visible.</h2>
+              <p className="mt-3 text-base leading-7 text-slate">
+                Create a request when produce is ready and track the route, contact, and current decision in one place.
+              </p>
+            </div>
+            <button onClick={() => setIsModalOpen(true)} className="inline-flex items-center gap-2 rounded-full bg-green px-5 py-3 text-sm font-semibold text-white shadow-[0_14px_28px_rgba(39,174,96,0.2)] transition hover:-translate-y-0.5 hover:bg-green-dark">
+              <Plus className="w-4 h-4" /> Request Transport
+            </button>
+          </div>
+          <div className="mt-6 grid gap-4 md:grid-cols-3">
+            {[
+              { label: 'Total requests', value: myRequests.length },
+              { label: 'Active requests', value: myRequests.filter((request) => request.status === 'pending' || request.status === 'accepted').length },
+              { label: 'Available produce', value: availableProduce.length },
+            ].map((item) => (
+              <div key={item.label} className="rounded-2xl bg-ivory p-4">
+                <p className="text-xs uppercase tracking-[0.18em] text-slate">{item.label}</p>
+                <p className="mt-2 text-2xl font-bold text-forest">{item.value}</p>
+              </div>
+            ))}
+          </div>
+          </section>
 
         {myRequests.length === 0 ? (
           <EmptyState icon={Truck} message="No transport requests yet" />
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full">
-              <thead>
-                <tr className="border-b">
-                  <th className="text-left p-3 font-semibold text-gray-600">Produce</th>
-                  <th className="text-left p-3 font-semibold text-gray-600">Dealer</th>
-                  <th className="text-left p-3 font-semibold text-gray-600">Contact Phone</th>
-                  <th className="text-left p-3 font-semibold text-gray-600">From</th>
-                  <th className="text-left p-3 font-semibold text-gray-600">To</th>
-                  <th className="text-left p-3 font-semibold text-gray-600">Description</th>
-                  <th className="text-left p-3 font-semibold text-gray-600">Status</th>
-                  <th className="text-left p-3 font-semibold text-gray-600">Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {myRequests.map((t, idx) => (
-                  <tr key={t.id} className={`border-b ${idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'}`}>
-                    <td className="p-3 font-medium">{t.produceName}</td>
-                    <td className="p-3">
-                      <span className="block font-medium">{t.dealerName || '-'}</span>
-                      <span className="text-xs text-gray-500">{t.dealerPhone || '-'}</span>
-                    </td>
-                    <td className="p-3">{t.contactPhone || t.farmerPhone || '-'}</td>
-                    <td className="p-3">{t.fromLocation}</td>
-                    <td className="p-3">{t.toLocation}</td>
-                    <td className="p-3">{t.notes || '-'}</td>
-                    <td className="p-3"><Badge status={t.status} /></td>
-                    <td className="p-3">
-                      {(t.status === 'pending' || t.status === 'accepted') && <button onClick={() => handleCancel(t.id)} className="px-3 py-1 text-sm text-red-500 hover:bg-red-50 rounded">Cancel</button>}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+          <div className="grid gap-5 xl:grid-cols-2">
+            {myRequests.map((request) => (
+              <article key={request.id} className="rounded-[1.75rem] border border-gray-100 bg-white p-5 shadow-sm transition hover:-translate-y-1 hover:shadow-lg">
+                <div className="flex items-start justify-between gap-4">
+                  <div>
+                    <div className="flex items-center gap-2 text-sm font-semibold uppercase tracking-[0.18em] text-green">
+                      <Route className="h-4 w-4" /> Request
+                    </div>
+                    <h3 className="mt-3 text-xl font-bold text-forest">{request.produceName}</h3>
+                    <p className="mt-1 text-sm text-slate">{request.quantity} units ready for pickup</p>
+                  </div>
+                  <Badge status={request.status} />
+                </div>
+
+                <div className="mt-5 grid gap-3 sm:grid-cols-2">
+                  <div className="rounded-2xl bg-ivory p-4">
+                    <p className="text-xs uppercase tracking-[0.18em] text-slate">Dealer</p>
+                    <p className="mt-1 font-semibold text-forest">{request.dealerName || '-'}</p>
+                    <p className="text-sm text-slate">{request.dealerPhone || '-'}</p>
+                  </div>
+                  <div className="rounded-2xl bg-ivory p-4">
+                    <p className="text-xs uppercase tracking-[0.18em] text-slate">Contact</p>
+                    <p className="mt-1 font-semibold text-forest">{request.contactPhone || request.farmerPhone || '-'}</p>
+                  </div>
+                </div>
+
+                <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                  <div className="rounded-2xl border border-gray-100 p-4">
+                    <p className="flex items-center gap-2 text-xs uppercase tracking-[0.18em] text-slate"><MapPin className="h-4 w-4 text-green" /> From</p>
+                    <p className="mt-2 font-semibold text-forest">{request.fromLocation}</p>
+                  </div>
+                  <div className="rounded-2xl border border-gray-100 p-4">
+                    <p className="flex items-center gap-2 text-xs uppercase tracking-[0.18em] text-slate"><MapPin className="h-4 w-4 text-green" /> To</p>
+                    <p className="mt-2 font-semibold text-forest">{request.toLocation}</p>
+                  </div>
+                </div>
+
+                <div className="mt-4 rounded-2xl bg-forest p-4 text-white">
+                  <p className="text-xs uppercase tracking-[0.18em] text-white/70">Description</p>
+                  <p className="mt-2 text-sm leading-6 text-white/88">{request.notes || request.description || 'No extra instructions provided.'}</p>
+                </div>
+
+                <div className="mt-5 flex flex-wrap items-center justify-between gap-3">
+                  <div className="flex items-center gap-2 text-sm text-slate">
+                    <Clock3 className="h-4 w-4" /> Track status from the dashboard
+                  </div>
+                  {(request.status === 'pending' || request.status === 'accepted') && <button onClick={() => handleCancel(request.id)} className="rounded-full border border-red-200 px-4 py-2 text-sm font-semibold text-red-600 transition hover:bg-red-50">Cancel request</button>}
+                </div>
+              </article>
+            ))}
           </div>
         )}
       </div>

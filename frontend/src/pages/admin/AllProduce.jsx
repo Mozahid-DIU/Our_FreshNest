@@ -1,12 +1,59 @@
+import { useMemo } from 'react';
 import { Package } from 'lucide-react';
 import { useAppData } from '../../context/AppDataContext';
 import { Topbar } from '../../components/layout/Topbar';
 import { EmptyState } from '../../components/ui/EmptyState';
 import { Badge } from '../../components/ui/Badge';
+import { DataTable } from '../../components/ui/DataTable';
 import { getProduceEmoji } from '../../utils/produceDB';
 
 export default function AllProduce() {
   const { products } = useAppData();
+
+  const columns = useMemo(
+    () => [
+      { key: 'id', label: 'ID', sortable: true },
+      {
+        key: 'name',
+        label: 'Produce',
+        sortable: true,
+        searchValue: (row) => `${row.name} ${row.category || ''}`,
+        render: (value) => (
+          <span>
+            <span className="mr-2">{getProduceEmoji(value)}</span>
+            {value}
+          </span>
+        ),
+      },
+      {
+        key: 'farmerName',
+        label: 'Farmer',
+        sortable: true,
+        render: (value) => value || '-',
+      },
+      {
+        key: 'quantity',
+        label: 'Quantity',
+        sortable: true,
+        sortValue: (row) => Number(row.quantity || 0),
+        render: (value, row) => `${value} ${row.unit}`,
+      },
+      {
+        key: 'price',
+        label: 'Price',
+        sortable: true,
+        sortValue: (row) => Number(row.price || 0),
+        render: (value) => `৳${value}`,
+      },
+      {
+        key: 'status',
+        label: 'Status',
+        sortable: true,
+        render: (value) => <Badge status={value} />,
+      },
+    ],
+    [],
+  );
 
   return (
     <div>
@@ -15,32 +62,13 @@ export default function AllProduce() {
         {products.length === 0 ? (
           <EmptyState icon={Package} message="No produce found" />
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full">
-              <thead>
-                <tr className="border-b">
-                  <th className="text-left p-3 font-semibold text-gray-600">ID</th>
-                  <th className="text-left p-3 font-semibold text-gray-600">Produce</th>
-                  <th className="text-left p-3 font-semibold text-gray-600">Farmer</th>
-                  <th className="text-left p-3 font-semibold text-gray-600">Quantity</th>
-                  <th className="text-left p-3 font-semibold text-gray-600">Price</th>
-                  <th className="text-left p-3 font-semibold text-gray-600">Status</th>
-                </tr>
-              </thead>
-              <tbody>
-                {products.map((p, idx) => (
-                  <tr key={p.id} className={`border-b ${idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'}`}>
-                    <td className="p-3">{p.id}</td>
-                    <td className="p-3"><span className="mr-2">{getProduceEmoji(p.name)}</span>{p.name}</td>
-                    <td className="p-3">{p.farmerName || '-'}</td>
-                    <td className="p-3">{p.quantity} {p.unit}</td>
-                    <td className="p-3">৳{p.price}</td>
-                    <td className="p-3"><Badge status={p.status} /></td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <DataTable
+            columns={columns}
+            data={products}
+            searchPlaceholder="Search produce, farmer, status"
+            emptyMessage="No produce items match your search"
+            caption="All produce records"
+          />
         )}
       </div>
     </div>

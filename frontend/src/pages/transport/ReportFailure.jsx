@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { AlertTriangle } from 'lucide-react';
+import { AlertTriangle, ShieldAlert } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { useAppData } from '../../context/AppDataContext';
 import { Modal } from '../../components/ui/Modal';
@@ -109,13 +109,33 @@ export default function ReportFailure() {
   return (
     <div>
       <Topbar title="Report Failure" />
-      <div className="p-6">
+      <div className="p-6 space-y-6">
+        <section className="rounded-[2rem] border border-gray-100 bg-white p-6 shadow-sm">
+          <div className="flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
+            <div className="max-w-2xl">
+              <p className="text-sm font-semibold uppercase tracking-[0.18em] text-red-600">Incident desk</p>
+              <h2 className="mt-2 text-2xl font-bold text-forest sm:text-3xl">Report delivery failures and trigger fallback routing.</h2>
+              <p className="mt-3 text-base leading-7 text-slate">
+                If a carrying vehicle faces route failure, report it here and immediately create an alternative request flow for the farmer.
+              </p>
+            </div>
+            <div className="rounded-2xl bg-ivory px-5 py-4 text-sm text-slate">
+              <p className="font-semibold text-forest">Accepted jobs: {acceptedJobs.length}</p>
+              <p className="mt-1">Eligible for incident report</p>
+            </div>
+          </div>
+        </section>
+
         {acceptedJobs.length === 0 ? (
           <EmptyState icon={AlertTriangle} message="No accepted jobs to report failure for" />
         ) : (
-          <div className="bg-white rounded-xl p-6 border border-gray-100">
-            <p className="text-gray-600 mb-4">You have {acceptedJobs.length} accepted job(s). Select one to report a failure.</p>
-            <button onClick={() => setIsModalOpen(true)} className="px-6 py-3 bg-red-500 text-white rounded-lg hover:bg-red-600">
+          <div className="rounded-[2rem] border border-gray-100 bg-white p-6 shadow-sm">
+            <div className="mb-4 flex items-center gap-2 text-red-600">
+              <ShieldAlert className="h-5 w-5" />
+              <p className="font-semibold">Failure reporting active</p>
+            </div>
+            <p className="mb-4 text-gray-600">You have {acceptedJobs.length} accepted job(s). Select one to report a failure.</p>
+            <button onClick={() => setIsModalOpen(true)} className="rounded-full bg-red-500 px-6 py-3 font-semibold text-white transition hover:-translate-y-0.5 hover:bg-red-600">
               Report Delivery Failure
             </button>
           </div>
@@ -124,6 +144,7 @@ export default function ReportFailure() {
 
       <Modal isOpen={isModalOpen} onClose={() => setIsModalOpen(false)} title="Report Delivery Failure">
         <div className="space-y-4">
+          <div className="rounded-2xl bg-red-50/60 p-3 text-sm text-red-700">Select the failed route and submit reason to open alternative handling.</div>
           <div>
             <label className="block text-sm font-medium mb-1">Select Job</label>
             <select value={form.transportId} onChange={(e) => setForm({ ...form, transportId: e.target.value })} className="w-full p-3 border rounded-xl">
@@ -159,6 +180,7 @@ export default function ReportFailure() {
           <p className="text-sm text-gray-600">
             Failure submitted. Create an alternative request so farmer can set a new price or return product.
           </p>
+          <div className="rounded-2xl bg-ivory p-3 text-sm text-slate">Fallback route details are auto-filled from the failed transport job.</div>
           <div>
             <label className="block text-sm font-medium mb-1">Quantity</label>
             <input

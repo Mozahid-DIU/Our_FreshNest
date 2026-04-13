@@ -357,14 +357,9 @@ router.patch('/alternatives/:id/decision', auth(['farmer']), async (req, res) =>
         );
 
         if (produceRows.length) {
-          const inventory = getInventoryState(produceRows[0].quantity, produceRows[0].sold_quantity);
-          const releaseQty = Math.min(parseQuantityValue(alternative.quantity) || 0, inventory.soldQuantity);
-          const nextSold = Math.max(inventory.soldQuantity - releaseQty, 0);
-          const nextInventory = getInventoryState(inventory.totalQuantity, nextSold);
-
           await connection.execute(
             'UPDATE produce SET sold_quantity = ?, status = ?, updated_at = NOW() WHERE id = ?',
-            [nextSold, nextInventory.status, alternative.product_id]
+            [0, 'Available', alternative.product_id]
           );
         }
 
@@ -401,6 +396,21 @@ router.patch('/alternatives/:id/decision', auth(['farmer']), async (req, res) =>
     if (!finalPrice || finalPrice <= 0) {
       await connection.rollback();
       return error(res, 'A valid price is required for acceptance.', 400);
+    }
+
+    if (alternative.product_id) {
+      const [produceRows] = await connection.execute(
+        'SELECT id, quantity FROM produce WHERE id = ? FOR UPDATE',
+        [alternative.product_id]
+      );
+
+      if (produceRows.length) {
+        const totalQuantity = Math.max(Number(produceRows[0].quantity) || 0, 0);
+        await connection.execute(
+          'UPDATE produce SET sold_quantity = ?, status = ?, updated_at = NOW() WHERE id = ?',
+          [totalQuantity, 'Sold', alternative.product_id]
+        );
+      }
     }
 
     const [newTransportResult] = await connection.execute(

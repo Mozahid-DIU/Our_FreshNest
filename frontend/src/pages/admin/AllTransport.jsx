@@ -1,11 +1,46 @@
+import { useMemo } from 'react';
 import { Truck } from 'lucide-react';
 import { useAppData } from '../../context/AppDataContext';
 import { Topbar } from '../../components/layout/Topbar';
 import { EmptyState } from '../../components/ui/EmptyState';
 import { Badge } from '../../components/ui/Badge';
+import { DataTable } from '../../components/ui/DataTable';
 
 export default function AllTransport() {
   const { transport } = useAppData();
+
+  const columns = useMemo(
+    () => [
+      { key: 'id', label: 'ID', sortable: true },
+      { key: 'produceName', label: 'Produce', sortable: true },
+      {
+        key: 'farmerName',
+        label: 'Farmer',
+        sortable: true,
+        render: (value) => value || '-',
+      },
+      {
+        key: 'transportName',
+        label: 'Transport',
+        sortable: true,
+        render: (value) => value || '-',
+      },
+      {
+        key: 'route',
+        label: 'Route',
+        sortable: false,
+        searchValue: (row) => `${row.fromLocation || ''} ${row.toLocation || ''}`,
+        render: (_, row) => `${row.fromLocation || '-'} -> ${row.toLocation || '-'}`,
+      },
+      {
+        key: 'status',
+        label: 'Status',
+        sortable: true,
+        render: (value) => <Badge status={value} />,
+      },
+    ],
+    [],
+  );
 
   return (
     <div>
@@ -14,32 +49,13 @@ export default function AllTransport() {
         {transport.length === 0 ? (
           <EmptyState icon={Truck} message="No transport records" />
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full">
-              <thead>
-                <tr className="border-b">
-                  <th className="text-left p-3 font-semibold text-gray-600">ID</th>
-                  <th className="text-left p-3 font-semibold text-gray-600">Produce</th>
-                  <th className="text-left p-3 font-semibold text-gray-600">Farmer</th>
-                  <th className="text-left p-3 font-semibold text-gray-600">Transport</th>
-                  <th className="text-left p-3 font-semibold text-gray-600">Route</th>
-                  <th className="text-left p-3 font-semibold text-gray-600">Status</th>
-                </tr>
-              </thead>
-              <tbody>
-                {transport.map((t, idx) => (
-                  <tr key={t.id} className={`border-b ${idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'}`}>
-                    <td className="p-3">{t.id}</td>
-                    <td className="p-3">{t.produceName}</td>
-                    <td className="p-3">{t.farmerName || '-'}</td>
-                    <td className="p-3">{t.transportName || '-'}</td>
-                    <td className="p-3">{t.fromLocation} → {t.toLocation}</td>
-                    <td className="p-3"><Badge status={t.status} /></td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <DataTable
+            columns={columns}
+            data={transport}
+            searchPlaceholder="Search produce, people, route, status"
+            emptyMessage="No transport records match your search"
+            caption="All transport records"
+          />
         )}
       </div>
     </div>

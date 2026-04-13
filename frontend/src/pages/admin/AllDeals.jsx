@@ -1,11 +1,52 @@
+import { useMemo } from 'react';
 import { ShoppingCart } from 'lucide-react';
 import { useAppData } from '../../context/AppDataContext';
 import { Topbar } from '../../components/layout/Topbar';
 import { EmptyState } from '../../components/ui/EmptyState';
 import { Badge } from '../../components/ui/Badge';
+import { DataTable } from '../../components/ui/DataTable';
 
 export default function AllDeals() {
   const { deals } = useAppData();
+
+  const columns = useMemo(
+    () => [
+      { key: 'id', label: 'ID', sortable: true },
+      { key: 'produceName', label: 'Produce', sortable: true },
+      {
+        key: 'farmerName',
+        label: 'Farmer',
+        sortable: true,
+        render: (value) => value || '-',
+      },
+      {
+        key: 'dealerName',
+        label: 'Dealer',
+        sortable: true,
+        render: (value) => value || '-',
+      },
+      {
+        key: 'quantity',
+        label: 'Quantity',
+        sortable: true,
+        sortValue: (row) => Number(row.quantity || 0),
+      },
+      {
+        key: 'price',
+        label: 'Price',
+        sortable: true,
+        sortValue: (row) => Number(row.price || 0),
+        render: (value) => `৳${value}`,
+      },
+      {
+        key: 'status',
+        label: 'Status',
+        sortable: true,
+        render: (value) => <Badge status={value} />,
+      },
+    ],
+    [],
+  );
 
   return (
     <div>
@@ -14,34 +55,13 @@ export default function AllDeals() {
         {deals.length === 0 ? (
           <EmptyState icon={ShoppingCart} message="No deals found" />
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full">
-              <thead>
-                <tr className="border-b">
-                  <th className="text-left p-3 font-semibold text-gray-600">ID</th>
-                  <th className="text-left p-3 font-semibold text-gray-600">Produce</th>
-                  <th className="text-left p-3 font-semibold text-gray-600">Farmer</th>
-                  <th className="text-left p-3 font-semibold text-gray-600">Dealer</th>
-                  <th className="text-left p-3 font-semibold text-gray-600">Quantity</th>
-                  <th className="text-left p-3 font-semibold text-gray-600">Price</th>
-                  <th className="text-left p-3 font-semibold text-gray-600">Status</th>
-                </tr>
-              </thead>
-              <tbody>
-                {deals.map((d, idx) => (
-                  <tr key={d.id} className={`border-b ${idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'}`}>
-                    <td className="p-3">{d.id}</td>
-                    <td className="p-3">{d.produceName}</td>
-                    <td className="p-3">{d.farmerName || '-'}</td>
-                    <td className="p-3">{d.dealerName || '-'}</td>
-                    <td className="p-3">{d.quantity}</td>
-                    <td className="p-3">৳{d.price}</td>
-                    <td className="p-3"><Badge status={d.status} /></td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <DataTable
+            columns={columns}
+            data={deals}
+            searchPlaceholder="Search by produce, farmer, dealer, status"
+            emptyMessage="No deals match your search"
+            caption="All deal records"
+          />
         )}
       </div>
     </div>
