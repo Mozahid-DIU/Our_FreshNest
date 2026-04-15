@@ -5,7 +5,12 @@ import { cn } from '../../utils/helpers';
 export function Modal({ isOpen, onClose, title, children, className }) {
   const dialogRef = useRef(null);
   const closeButtonRef = useRef(null);
+  const onCloseRef = useRef(onClose);
   const titleId = useId();
+
+  useEffect(() => {
+    onCloseRef.current = onClose;
+  }, [onClose]);
 
   useEffect(() => {
     if (!isOpen) return undefined;
@@ -15,11 +20,9 @@ export function Modal({ isOpen, onClose, title, children, className }) {
 
     const handleKeyDown = (event) => {
       if (event.key === 'Escape') {
-        onClose();
+        onCloseRef.current();
         return;
       }
-
-      if (event.key !== 'Tab') return;
 
       const container = dialogRef.current;
       if (!container) return;
@@ -49,7 +52,7 @@ export function Modal({ isOpen, onClose, title, children, className }) {
         previouslyFocused.focus();
       }
     };
-  }, [isOpen, onClose]);
+  }, [isOpen]);
 
   if (!isOpen) return null;
   return (
