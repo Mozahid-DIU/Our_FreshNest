@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Package, ShoppingCart, TrendingUp, ArrowRight, Truck, ClipboardCheck } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
@@ -8,10 +9,66 @@ import { ProposalCard } from '../../components/ui/ProposalCard';
 import { EmptyState } from '../../components/ui/EmptyState';
 import toast from 'react-hot-toast';
 import { parseQuantityValue } from '../../utils/helpers';
+import { formatCountdown, useCountdown } from '../../hooks/useCountdown';
+
+function AlternativeOpportunityCard({ item, onAccept, onExpired, isAccepting, currentDealerId, isLocallyAccepted }) {
+  const remainingMs = useCountdown(item.expiresAt);
+  const [hasExpiredRefreshTriggered, setHasExpiredRefreshTriggered] = useState(false);
+
+  useEffect(() => {
+    if (remainingMs > 0 || hasExpiredRefreshTriggered) return;
+    setHasExpiredRefreshTriggered(true);
+    onExpired();
+  }, [remainingMs, hasExpiredRefreshTriggered, onExpired]);
+
+  const isExpired = remainingMs <= 0;
+  const normalizedStatus = String(item.status || '').toLowerCase();
+  const resolvedClaimedDealerId = Number(item.claimedDealerId || 0);
+  const hasClaimMarker = resolvedClaimedDealerId > 0 || Boolean(item.claimedAt);
+  const isClaimedByAnyDealer = normalizedStatus === 'claimedbydealer' || (normalizedStatus === 'acceptednewprice' && hasClaimMarker);
+  const isClaimedByCurrentDealer = isClaimedByAnyDealer && resolvedClaimedDealerId === Number(currentDealerId || 0);
+  const isClaimedByAnotherDealer = isClaimedByAnyDealer && !isClaimedByCurrentDealer;
+  const isAcceptedState = isLocallyAccepted || isClaimedByCurrentDealer || isClaimedByAnotherDealer;
+  const isActionDisabled = isExpired || isAccepting || isAcceptedState;
+  const actionLabel = isAcceptedState ? 'Accepted' : isAccepting ? 'Accepting...' : 'Accept New Price';
+
+  return (
+    <div className="rounded-2xl border border-amber-200 bg-amber-50/50 p-4">
+      <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+        <div>
+          <p className="text-base font-semibold text-forest">{item.fruitType || item.produceName} - {item.quantity} kg</p>
+          <p className="mt-1 text-sm text-gray-600">
+            New farmer price: <span className="font-semibold text-forest">৳{item.finalPricePerKg || item.requestedPricePerKg || 'N/A'}/kg</span>
+          </p>
+          <p className="text-sm text-gray-500">
+            Pickup: {item.currentLocation || '-'} {'->'} {item.preferredDealerLocation || '-'}
+          </p>
+        </div>
+
+        <div className="flex min-w-[220px] flex-col items-start gap-2 rounded-xl bg-white p-3 shadow-sm md:items-end">
+          <p className="text-xs font-semibold uppercase tracking-[0.18em] text-amber-600">Time left</p>
+          <p className={`text-xl font-bold ${isAcceptedState ? 'text-green-700' : isExpired ? 'text-red-600' : 'text-forest'}`}>
+            {isAcceptedState ? 'Accepted' : isExpired ? 'Expired' : formatCountdown(remainingMs)}
+          </p>
+          <button
+            type="button"
+            onClick={() => onAccept(item.id)}
+            disabled={isActionDisabled}
+            className="rounded-xl bg-forest px-4 py-2 text-sm font-semibold text-white transition hover:bg-forest/90 disabled:cursor-not-allowed disabled:bg-gray-300"
+          >
+            {actionLabel}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 export default function DealerDashboard() {
   const { user } = useAuth();
-  const { products, deals, transport, alternatives, proposals, updateProposal, loadAllData } = useAppData();
+  const { products, deals, transport, alternatives, proposals, updateProposal, acceptAlternativeRequest, loadAllData } = useAppData();
+  const [acceptingAlternativeId, setAcceptingAlternativeId] = useState(null);
+  const [locallyAcceptedAlternativeIds, setLocallyAcceptedAlternativeIds] = useState({});
 
   const availableProduce = products.filter((p) => p.status !== 'sold' && parseQuantityValue(p.availableQuantity ?? p.quantity) > 0);
   const myDeals = deals.filter(d => d.dealerId === user?.id);
@@ -24,9 +81,15 @@ export default function DealerDashboard() {
     return product.status === 'sold' || remaining <= 0;
   });
   const activeProposals = proposals.filter((proposal) => proposal.status === 'published');
-  const acceptedAlternatives = alternatives.filter(
-    (item) => item.dealerId === user?.id && item.status === 'acceptednewprice'
-  );
+  const publishedAlternatives = alternatives.filter((item) => ['publishedtodealers', 'acceptednewprice'].includes(item.status));
+  const acceptedAlternatives = alternatives.filter((item) => {
+    const normalizedStatus = String(item.status || '').toLowerCase();
+    const claimedDealerId = Number(item.claimedDealerId || 0);
+    const hasClaimMarker = claimedDealerId > 0 || Boolean(item.claimedAt);
+    if (!['claimedbydealer', 'acceptednewprice'].includes(normalizedStatus)) return false;
+    if (!hasClaimMarker) return false;
+    return claimedDealerId === Number(user?.id || 0);
+  });
 
   const stats = [
     { icon: Package, label: 'Available Produce', value: availableProduce.length, color: 'green' },
@@ -40,6 +103,19 @@ export default function DealerDashboard() {
       toast.success('Proposal accepted and route updated');
     } catch (err) {
       toast.error(err?.response?.data?.error || 'Failed to accept proposal');
+    }
+  };
+
+  const handleAcceptAlternative = async (alternativeId) => {
+    setAcceptingAlternativeId(alternativeId);
+    try {
+      await acceptAlternativeRequest(alternativeId);
+      setLocallyAcceptedAlternativeIds((current) => ({ ...current, [alternativeId]: true }));
+      toast.success('Alternative request accepted. You are the winning dealer.');
+    } catch (err) {
+      toast.error(err?.response?.data?.error || 'Failed to accept alternative request');
+    } finally {
+      setAcceptingAlternativeId(null);
     }
   };
 
@@ -175,15 +251,33 @@ export default function DealerDashboard() {
         </div>
 
         <div className="rounded-[2rem] border border-gray-100 bg-white p-6 shadow-sm">
+          <h3 className="mb-4 text-lg font-semibold">Alternative Price Opportunities</h3>
+          <div className="space-y-3">
+            {publishedAlternatives.length > 0 ? publishedAlternatives.map((item) => (
+              <AlternativeOpportunityCard
+                key={item.id}
+                item={item}
+                onAccept={handleAcceptAlternative}
+                onExpired={loadAllData}
+                isAccepting={acceptingAlternativeId === item.id}
+                currentDealerId={user?.id}
+                isLocallyAccepted={Boolean(locallyAcceptedAlternativeIds[item.id])}
+              />
+            )) : <EmptyState message="No active alternative opportunities right now" />}
+          </div>
+        </div>
+
+        <div className="rounded-[2rem] border border-gray-100 bg-white p-6 shadow-sm">
           <h3 className="mb-4 text-lg font-semibold">Alternative Selling Updates</h3>
           <div className="space-y-3">
             {acceptedAlternatives.length > 0 ? acceptedAlternatives.slice(0, 6).map((item) => (
               <div key={item.id} className="rounded-xl border border-forest/10 bg-ivory p-4 flex items-center justify-between">
                 <div>
-                  <p className="font-medium">{item.produceName} • {item.quantity} kg</p>
+                  <p className="font-medium">{item.fruitType || item.produceName} • {item.quantity} kg</p>
                   <p className="text-sm text-gray-500">
                     Farmer set new price • ৳{item.finalPricePerKg || 'N/A'}/kg
                   </p>
+                  <p className="text-xs text-gray-400">Claimed at: {item.claimedAt ? new Date(item.claimedAt).toLocaleString() : '-'}</p>
                 </div>
                 <span className="rounded-full bg-blue-100 px-3 py-1 text-xs font-semibold text-blue-700">Accepted</span>
               </div>

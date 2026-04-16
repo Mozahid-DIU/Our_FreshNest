@@ -150,6 +150,7 @@ const CREATE_TABLES = [
     id                         INT AUTO_INCREMENT PRIMARY KEY,
     failure_id                 INT NOT NULL,
     source_transport_request_id INT NOT NULL,
+    source_deal_id             INT DEFAULT NULL,
     product_id                 INT DEFAULT NULL,
     produce_name               VARCHAR(100) DEFAULT '',
     quantity                   DECIMAL(10,2) NOT NULL DEFAULT 0,
@@ -168,16 +169,23 @@ const CREATE_TABLES = [
     requested_price_per_kg     DECIMAL(10,2) DEFAULT NULL,
     proposed_price_per_kg      DECIMAL(10,2) DEFAULT NULL,
     final_price_per_kg         DECIMAL(10,2) DEFAULT NULL,
+    published_at               DATETIME DEFAULT NULL,
+    expires_at                 DATETIME DEFAULT NULL,
+    claimed_dealer_id          INT DEFAULT NULL,
+    claimed_dealer_name        VARCHAR(150) DEFAULT NULL,
+    claimed_at                 DATETIME DEFAULT NULL,
     generated_transport_request_id INT DEFAULT NULL,
     decision_notes             TEXT,
-    status                     ENUM('PendingFarmerDecision','AcceptedOldPrice','AcceptedNewPrice','Returned') NOT NULL DEFAULT 'PendingFarmerDecision',
+    status                     ENUM('PendingFarmerDecision','PublishedToDealers','ClaimedByDealer','Returned','ExpiredAutoReturn') NOT NULL DEFAULT 'PendingFarmerDecision',
     created_at                 DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at                 DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     FOREIGN KEY (failure_id) REFERENCES delivery_failures(id) ON DELETE CASCADE,
     FOREIGN KEY (source_transport_request_id) REFERENCES transport_requests(id) ON DELETE CASCADE,
+    FOREIGN KEY (source_deal_id) REFERENCES deals(id) ON DELETE SET NULL,
     FOREIGN KEY (product_id) REFERENCES produce(id) ON DELETE SET NULL,
     FOREIGN KEY (farmer_id) REFERENCES users(id) ON DELETE CASCADE,
     FOREIGN KEY (dealer_id) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (claimed_dealer_id) REFERENCES users(id) ON DELETE SET NULL,
     FOREIGN KEY (transporter_id) REFERENCES users(id) ON DELETE CASCADE,
     FOREIGN KEY (generated_transport_request_id) REFERENCES transport_requests(id) ON DELETE SET NULL,
     UNIQUE KEY uq_failure_id (failure_id),
@@ -323,6 +331,37 @@ async function init() {
     );
   }
 
+  async function ensureAlternativeStatusEnum() {
+    const [rows] = await pool.execute(
+      `SELECT COLUMN_TYPE AS column_type
+       FROM INFORMATION_SCHEMA.COLUMNS
+       WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'failure_alternative_requests' AND COLUMN_NAME = 'status'`,
+      [process.env.DB_NAME || 'freshnest_db']
+    );
+
+    if (!rows.length) return;
+
+    const columnType = String(rows[0].column_type || '');
+    if (
+      columnType.includes("'PublishedToDealers'") &&
+      columnType.includes("'ClaimedByDealer'") &&
+      columnType.includes("'ExpiredAutoReturn'")
+    ) {
+      return;
+    }
+
+    await pool.execute(
+      `UPDATE failure_alternative_requests
+       SET status = 'ClaimedByDealer'
+       WHERE status IN ('AcceptedOldPrice', 'AcceptedNewPrice')`
+    );
+
+    await pool.execute(
+      `ALTER TABLE failure_alternative_requests
+       MODIFY COLUMN status ENUM('PendingFarmerDecision','PublishedToDealers','ClaimedByDealer','Returned','ExpiredAutoReturn') NOT NULL DEFAULT 'PendingFarmerDecision'`
+    );
+  }
+
   try {
     console.log('Creating tables...');
     for (const sql of CREATE_TABLES) {
@@ -342,10 +381,16 @@ async function init() {
     await ensureColumn('transport_requests', 'dealer_phone', "dealer_phone VARCHAR(20) DEFAULT ''");
     await ensureColumn('transport_requests', 'dealer_location', "dealer_location VARCHAR(150) DEFAULT ''");
     await ensureUniqueIndex('failure_alternative_requests', 'uq_failure_id', 'UNIQUE KEY uq_failure_id (failure_id)');
+    await ensureColumn('failure_alternative_requests', 'source_deal_id', 'source_deal_id INT DEFAULT NULL');
     await ensureColumn('failure_alternative_requests', 'current_location', "current_location VARCHAR(200) NOT NULL DEFAULT ''");
     await ensureColumn('failure_alternative_requests', 'fruit_type', "fruit_type VARCHAR(100) NOT NULL DEFAULT ''");
     await ensureColumn('failure_alternative_requests', 'pickup_date', 'pickup_date DATE NULL');
     await ensureColumn('failure_alternative_requests', 'preferred_dealer_location', "preferred_dealer_location VARCHAR(200) NOT NULL DEFAULT ''");
+    await ensureColumn('failure_alternative_requests', 'published_at', 'published_at DATETIME DEFAULT NULL');
+    await ensureColumn('failure_alternative_requests', 'expires_at', 'expires_at DATETIME DEFAULT NULL');
+    await ensureColumn('failure_alternative_requests', 'claimed_dealer_id', 'claimed_dealer_id INT DEFAULT NULL');
+    await ensureColumn('failure_alternative_requests', 'claimed_dealer_name', 'claimed_dealer_name VARCHAR(150) DEFAULT NULL');
+    await ensureColumn('failure_alternative_requests', 'claimed_at', 'claimed_at DATETIME DEFAULT NULL');
     await pool.execute(
       `UPDATE failure_alternative_requests
        SET pickup_date = COALESCE(pickup_date, DATE(created_at), CURRENT_DATE)
@@ -360,6 +405,7 @@ async function init() {
     await ensureColumn('delivery_failures', 'updated_at', 'updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP');
     await ensureProposalCompletedStatus();
     await ensureDealCompletedStatus();
+    await ensureAlternativeStatusEnum();
     const oldSeedHash = '$2a$12$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMQyCMRfDpv1rqmEu5C7.cVZ7i';
     const adminHash = '$2a$12$cN1Y6KhF8dv.asRSGgKZYO8mdZ0ak1YEP3s6sbvq542uqShny3Yfe';
     const userHash = '$2a$12$8HyQhraBlMaxyuj1V/NODOgL99TIjAyShGLF65vqVXzcrZhplNgPW';

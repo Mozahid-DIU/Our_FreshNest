@@ -2,9 +2,166 @@ const express = require('express');
 const { query, pool } = require('../config/db');
 const { auth } = require('../middleware/auth');
 const { success, error } = require('../utils/response');
-const { parseQuantityValue, getInventoryState } = require('../utils/inventory');
+const { parseQuantityValue } = require('../utils/inventory');
 
 const router = express.Router();
+const DEALER_ALTERNATIVE_WINDOW_HOURS = 1;
+
+async function readAlternativeStatusEnum(connection) {
+  const [rows] = await connection.execute(
+    `SELECT COLUMN_TYPE AS column_type
+     FROM INFORMATION_SCHEMA.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE()
+       AND TABLE_NAME = 'failure_alternative_requests'
+       AND COLUMN_NAME = 'status'
+     LIMIT 1`
+  );
+
+  return String(rows[0]?.column_type || '');
+}
+
+function isAlternativeFallbackError(err) {
+  const fallbackEligibleCodes = [
+    'ER_BAD_FIELD_ERROR',
+    'ER_TRUNCATED_WRONG_VALUE_FOR_FIELD',
+    'WARN_DATA_TRUNCATED',
+    'ER_WARN_DATA_TRUNCATED',
+  ];
+
+  return Boolean(err && fallbackEligibleCodes.includes(String(err.code || '')));
+}
+
+async function syncProduceInventoryFromAcceptedDeals(connection, productId, farmerId) {
+  if (!productId) return;
+
+  const [produceRows] = await connection.execute(
+    'SELECT id, quantity FROM produce WHERE id = ? FOR UPDATE',
+    [productId]
+  );
+
+  if (!produceRows.length) return;
+
+  const totalQuantity = Math.max(Number(produceRows[0].quantity) || 0, 0);
+  const [acceptedRows] = await connection.execute(
+    `SELECT COALESCE(SUM(CAST(quantity_requested AS DECIMAL(10,2))), 0) AS accepted_quantity
+     FROM deals
+     WHERE product_id = ? AND farmer_id = ? AND status = 'Accepted'`,
+    [productId, farmerId]
+  );
+
+  const acceptedQuantity = Math.max(Number(acceptedRows[0]?.accepted_quantity || 0), 0);
+  const nextSoldQuantity = Math.min(acceptedQuantity, totalQuantity);
+  const nextStatus = nextSoldQuantity >= totalQuantity ? 'Sold' : nextSoldQuantity > 0 ? 'Reserved' : 'Available';
+
+  await connection.execute(
+    'UPDATE produce SET sold_quantity = ?, status = ?, updated_at = NOW() WHERE id = ?',
+    [nextSoldQuantity, nextStatus, productId]
+  );
+}
+
+async function revertAlternativeToInventory(connection, alternative, notes = '') {
+  if (!alternative?.product_id) return;
+
+  let releasedQuantity = 0;
+
+  if (alternative.source_deal_id) {
+    const [sourceDealRows] = await connection.execute(
+      'SELECT id, quantity_requested FROM deals WHERE id = ? AND status = ? LIMIT 1',
+      [alternative.source_deal_id, 'Accepted']
+    );
+
+    if (sourceDealRows.length) {
+      releasedQuantity = Math.max(parseQuantityValue(sourceDealRows[0].quantity_requested) || 0, 0);
+      await connection.execute(
+        'UPDATE deals SET status = ?, updated_at = NOW() WHERE id = ?',
+        ['Cancelled', alternative.source_deal_id]
+      );
+    }
+  }
+
+  if (!releasedQuantity && alternative.dealer_id) {
+    const [fallbackDealRows] = await connection.execute(
+      `SELECT id, quantity_requested
+       FROM deals
+       WHERE product_id = ? AND farmer_id = ? AND dealer_id = ? AND status = 'Accepted'
+       ORDER BY responded_at DESC, created_at DESC
+       LIMIT 1`,
+      [alternative.product_id, alternative.farmer_id, alternative.dealer_id]
+    );
+
+    if (fallbackDealRows.length) {
+      releasedQuantity = Math.max(parseQuantityValue(fallbackDealRows[0].quantity_requested) || 0, 0);
+      await connection.execute(
+        'UPDATE deals SET status = ?, updated_at = NOW() WHERE id = ?',
+        ['Cancelled', fallbackDealRows[0].id]
+      );
+    }
+  }
+
+  const [produceRows] = await connection.execute(
+    'SELECT id, quantity, sold_quantity FROM produce WHERE id = ? FOR UPDATE',
+    [alternative.product_id]
+  );
+
+  if (produceRows.length) {
+    const totalQuantity = Math.max(Number(produceRows[0].quantity) || 0, 0);
+    const currentSoldQuantity = Math.max(Number(produceRows[0].sold_quantity) || 0, 0);
+    const nextSoldQuantity = Math.max(0, currentSoldQuantity - releasedQuantity);
+    const normalizedSoldQuantity = Math.min(nextSoldQuantity, totalQuantity);
+    const nextStatus = normalizedSoldQuantity === 0 ? 'Available' : normalizedSoldQuantity >= totalQuantity ? 'Sold' : 'Reserved';
+
+    await connection.execute(
+      'UPDATE produce SET sold_quantity = ?, status = ?, updated_at = NOW() WHERE id = ?',
+      [normalizedSoldQuantity, nextStatus, alternative.product_id]
+    );
+  }
+
+  if (notes) {
+    await connection.execute(
+      `UPDATE failure_alternative_requests
+       SET decision_notes = TRIM(CONCAT(IFNULL(decision_notes, ''), CASE WHEN IFNULL(decision_notes, '') = '' THEN '' ELSE ' | ' END, ?)), updated_at = NOW()
+       WHERE id = ?`,
+      [notes, alternative.id]
+    );
+  }
+}
+
+async function expireStalePublishedAlternatives() {
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+
+    const [rows] = await connection.execute(
+      `SELECT *
+       FROM failure_alternative_requests
+       WHERE status = 'PublishedToDealers'
+         AND expires_at IS NOT NULL
+         AND expires_at <= NOW()
+       FOR UPDATE`
+    );
+
+    for (const alternative of rows) {
+      await revertAlternativeToInventory(connection, alternative, 'Auto expired after 1 hour dealer window');
+      await connection.execute(
+        `UPDATE failure_alternative_requests
+         SET status = 'ExpiredAutoReturn',
+             claimed_dealer_id = NULL,
+             claimed_dealer_name = NULL,
+             claimed_at = NULL,
+             generated_transport_request_id = NULL,
+             updated_at = NOW()
+         WHERE id = ?`,
+        [alternative.id]
+      );
+    }
+
+    await connection.commit();
+  } catch (_err) {
+    await connection.rollback();
+  } finally {
+    connection.release();
+  }
+}
 
 router.get('/', auth(), async (req, res) => {
   try {
@@ -95,6 +252,8 @@ router.post('/', auth(['transport']), async (req, res) => {
 
 router.get('/alternatives', auth(), async (req, res) => {
   try {
+    await expireStalePublishedAlternatives();
+
     let rows;
     if (req.user.role === 'transport') {
       rows = await query(
@@ -107,10 +266,29 @@ router.get('/alternatives', auth(), async (req, res) => {
         [req.user.id]
       );
     } else if (req.user.role === 'dealer') {
-      rows = await query(
-        'SELECT * FROM failure_alternative_requests WHERE dealer_id = ? ORDER BY created_at DESC',
-        [req.user.id]
-      );
+      try {
+        rows = await query(
+          `SELECT *
+           FROM failure_alternative_requests
+           WHERE status = 'PublishedToDealers'
+              OR (status = 'AcceptedNewPrice' AND DATE_ADD(COALESCE(updated_at, created_at), INTERVAL ? HOUR) > NOW())
+              OR claimed_dealer_id = ?
+              OR dealer_id = ?
+           ORDER BY created_at DESC`,
+          [DEALER_ALTERNATIVE_WINDOW_HOURS, req.user.id, req.user.id]
+        );
+      } catch (dealerReadErr) {
+        if (!dealerReadErr || dealerReadErr.code !== 'ER_BAD_FIELD_ERROR') throw dealerReadErr;
+
+        rows = await query(
+          `SELECT *
+           FROM failure_alternative_requests
+           WHERE (status IN ('AcceptedNewPrice', 'PublishedToDealers') AND DATE_ADD(COALESCE(updated_at, created_at), INTERVAL ? HOUR) > NOW())
+              OR dealer_id = ?
+           ORDER BY created_at DESC`,
+          [DEALER_ALTERNATIVE_WINDOW_HOURS, req.user.id]
+        );
+      }
     } else if (req.user.role === 'admin') {
       rows = await query('SELECT * FROM failure_alternative_requests ORDER BY created_at DESC');
     } else {
@@ -186,7 +364,7 @@ router.post('/:id/alternatives', auth(['transport']), async (req, res) => {
     const [existingRows] = await connection.execute(
       `SELECT id
        FROM failure_alternative_requests
-       WHERE failure_id = ? AND status IN ('PendingFarmerDecision', 'AcceptedOldPrice', 'AcceptedNewPrice')
+       WHERE failure_id = ? AND status IN ('PendingFarmerDecision', 'PublishedToDealers', 'ClaimedByDealer')
        LIMIT 1`,
       [failure.id]
     );
@@ -211,20 +389,22 @@ router.post('/:id/alternatives', auth(['transport']), async (req, res) => {
     let dealerPhone = failure.dealer_phone || '';
     let dealerLocation = failure.dealer_location || '';
     let requestedPrice = null;
+    let sourceDealId = null;
 
     if (failure.product_id) {
       const [dealRows] = await connection.execute(
-        `SELECT d.dealer_id, d.dealer_name, d.offered_price_per_kg, u.phone AS dealer_phone, u.location AS dealer_location
+        `SELECT d.id, d.dealer_id, d.dealer_name, d.offered_price_per_kg, d.status, u.phone AS dealer_phone, u.location AS dealer_location
          FROM deals d
          LEFT JOIN users u ON u.id = d.dealer_id
          WHERE d.product_id = ? AND d.farmer_id = ? AND d.status IN ('Accepted','Completed')
-         ORDER BY d.responded_at DESC, d.created_at DESC
+         ORDER BY (d.status = 'Accepted') DESC, d.responded_at DESC, d.created_at DESC
          LIMIT 1`,
         [failure.product_id, failure.farmer_id]
       );
 
       if (dealRows.length) {
         const deal = dealRows[0];
+        sourceDealId = String(deal.status || '').toLowerCase() === 'accepted' ? deal.id : null;
         dealerId = dealerId || deal.dealer_id || null;
         dealerName = dealerName || deal.dealer_name || '';
         dealerPhone = dealerPhone || deal.dealer_phone || '';
@@ -233,37 +413,75 @@ router.post('/:id/alternatives', auth(['transport']), async (req, res) => {
       }
     }
 
-    const [insertResult] = await connection.execute(
-      `INSERT INTO failure_alternative_requests (
-         failure_id, source_transport_request_id, product_id, produce_name, quantity,
-         farmer_id, farmer_name, dealer_id, dealer_name, dealer_phone, dealer_location,
-         transporter_id, transporter_name, current_location, fruit_type, pickup_date, preferred_dealer_location,
-         requested_price_per_kg, proposed_price_per_kg, decision_notes, status
-       )
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PendingFarmerDecision')`,
-      [
-        failure.id,
-        failure.source_transport_request_id,
-        failure.product_id || null,
-        failure.produce_name || '',
-        requestedQty,
-        failure.farmer_id,
-        failure.farmer_name || '',
-        dealerId,
-        dealerName,
-        dealerPhone,
-        dealerLocation,
-        req.user.id,
-        req.user.name,
-        currentLocation,
-        fruitType,
-        pickupDate,
-        preferredDealerLocation,
-        requestedPrice,
-        null,
-        notes || '',
-      ]
-    );
+    let insertResult;
+    try {
+      [insertResult] = await connection.execute(
+        `INSERT INTO failure_alternative_requests (
+           failure_id, source_transport_request_id, source_deal_id, product_id, produce_name, quantity,
+           farmer_id, farmer_name, dealer_id, dealer_name, dealer_phone, dealer_location,
+           transporter_id, transporter_name, current_location, fruit_type, pickup_date, preferred_dealer_location,
+           requested_price_per_kg, proposed_price_per_kg, decision_notes, status
+         )
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PendingFarmerDecision')`,
+        [
+          failure.id,
+          failure.source_transport_request_id,
+          sourceDealId,
+          failure.product_id || null,
+          failure.produce_name || '',
+          requestedQty,
+          failure.farmer_id,
+          failure.farmer_name || '',
+          dealerId,
+          dealerName,
+          dealerPhone,
+          dealerLocation,
+          req.user.id,
+          req.user.name,
+          currentLocation,
+          fruitType,
+          pickupDate,
+          preferredDealerLocation,
+          requestedPrice,
+          null,
+          notes || '',
+        ]
+      );
+    } catch (insertErr) {
+      if (!insertErr || insertErr.code !== 'ER_BAD_FIELD_ERROR') throw insertErr;
+
+      [insertResult] = await connection.execute(
+        `INSERT INTO failure_alternative_requests (
+           failure_id, source_transport_request_id, product_id, produce_name, quantity,
+           farmer_id, farmer_name, dealer_id, dealer_name, dealer_phone, dealer_location,
+           transporter_id, transporter_name, current_location, fruit_type, pickup_date, preferred_dealer_location,
+           requested_price_per_kg, proposed_price_per_kg, decision_notes, status
+         )
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PendingFarmerDecision')`,
+        [
+          failure.id,
+          failure.source_transport_request_id,
+          failure.product_id || null,
+          failure.produce_name || '',
+          requestedQty,
+          failure.farmer_id,
+          failure.farmer_name || '',
+          dealerId,
+          dealerName,
+          dealerPhone,
+          dealerLocation,
+          req.user.id,
+          req.user.name,
+          currentLocation,
+          fruitType,
+          pickupDate,
+          preferredDealerLocation,
+          requestedPrice,
+          null,
+          notes || '',
+        ]
+      );
+    }
 
     const [newRows] = await connection.execute('SELECT * FROM failure_alternative_requests WHERE id = ?', [insertResult.insertId]);
     await connection.commit();
@@ -307,88 +525,18 @@ router.patch('/alternatives/:id/decision', auth(['farmer']), async (req, res) =>
       return error(res, 'Alternative request already decided.', 400);
     }
 
-    const [sourceRows] = await connection.execute(
-      `SELECT id, pickup_location
-       FROM transport_requests
-       WHERE id = ?
-       LIMIT 1`,
-      [alternative.source_transport_request_id]
-    );
-
-    if (!sourceRows.length) {
-      await connection.rollback();
-      return error(res, 'Source transport request not found.', 404);
-    }
-
-    const sourceRequest = sourceRows[0];
-
     if (normalizedAction === 'return_product') {
-      const [returnTransportResult] = await connection.execute(
-        `INSERT INTO transport_requests (
-           farmer_id, farmer_name, product_id, produce_name, contact_phone,
-           dealer_id, dealer_name, dealer_phone, dealer_location,
-           pickup_location, destination, pickup_date, quantity, notes, status, assigned_to, transporter_name
-         )
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Accepted', ?, ?)` ,
-        [
-          alternative.farmer_id,
-          alternative.farmer_name,
-          alternative.product_id || null,
-          alternative.fruit_type || alternative.produce_name,
-          '',
-          null,
-          '',
-          '',
-          '',
-          alternative.current_location,
-          sourceRequest.pickup_location,
-          alternative.pickup_date || null,
-          String(alternative.quantity),
-          `Return to farmer requested from alternative #${alternative.id}${notes ? ` | ${notes}` : ''}`,
-          alternative.transporter_id,
-          alternative.transporter_name || null,
-        ]
-      );
-
-      if (alternative.product_id) {
-        const [produceRows] = await connection.execute(
-          'SELECT id, quantity, sold_quantity FROM produce WHERE id = ? FOR UPDATE',
-          [alternative.product_id]
-        );
-
-        if (produceRows.length) {
-          await connection.execute(
-            'UPDATE produce SET sold_quantity = ?, status = ?, updated_at = NOW() WHERE id = ?',
-            [0, 'Available', alternative.product_id]
-          );
-        }
-
-        await connection.execute(
-          `UPDATE deals
-           SET status = 'Cancelled', updated_at = NOW()
-           WHERE id = (
-             SELECT id FROM (
-               SELECT id
-               FROM deals
-               WHERE product_id = ? AND farmer_id = ? AND status = 'Accepted'
-                 AND (? IS NULL OR dealer_id = ?)
-               ORDER BY responded_at DESC, created_at DESC
-               LIMIT 1
-             ) x
-           )`,
-          [alternative.product_id, alternative.farmer_id, alternative.dealer_id, alternative.dealer_id]
-        );
-      }
+      await revertAlternativeToInventory(connection, alternative);
 
       await connection.execute(
         `UPDATE failure_alternative_requests
-         SET status = 'Returned', generated_transport_request_id = ?, decision_notes = ?, updated_at = NOW()
+         SET status = 'Returned', generated_transport_request_id = NULL, decision_notes = ?, updated_at = NOW()
          WHERE id = ?`,
-        [returnTransportResult.insertId, notes || '', alternative.id]
+        [notes || '', alternative.id]
       );
 
       await connection.commit();
-      return success(res, { message: 'Return request created and assigned to transporter.' });
+      return success(res, { message: 'Product returned to farmer inventory. Transporter can coordinate return manually.' });
     }
 
     const finalPrice = parseQuantityValue(new_price_per_kg);
@@ -398,22 +546,109 @@ router.patch('/alternatives/:id/decision', auth(['farmer']), async (req, res) =>
       return error(res, 'A valid price is required for acceptance.', 400);
     }
 
-    if (alternative.product_id) {
-      const [produceRows] = await connection.execute(
-        'SELECT id, quantity FROM produce WHERE id = ? FOR UPDATE',
-        [alternative.product_id]
+    try {
+      await connection.execute(
+        `UPDATE failure_alternative_requests
+         SET status = 'PublishedToDealers',
+             final_price_per_kg = ?,
+             published_at = NOW(),
+             expires_at = DATE_ADD(NOW(), INTERVAL ? HOUR),
+             claimed_dealer_id = NULL,
+             claimed_dealer_name = NULL,
+             claimed_at = NULL,
+             generated_transport_request_id = NULL,
+             decision_notes = ?,
+             updated_at = NOW()
+         WHERE id = ?`,
+        [finalPrice, DEALER_ALTERNATIVE_WINDOW_HOURS, notes || '', alternative.id]
       );
+    } catch (publishErr) {
+      // Backward-compatible fallback for databases that still use the older schema.
+      if (!isAlternativeFallbackError(publishErr)) {
+        throw publishErr;
+      }
 
-      if (produceRows.length) {
-        const totalQuantity = Math.max(Number(produceRows[0].quantity) || 0, 0);
-        await connection.execute(
-          'UPDATE produce SET sold_quantity = ?, status = ?, updated_at = NOW() WHERE id = ?',
-          [totalQuantity, 'Sold', alternative.product_id]
-        );
+      const enumType = await readAlternativeStatusEnum(connection);
+      const fallbackStatus = enumType.includes("'PublishedToDealers'")
+        ? 'PublishedToDealers'
+        : enumType.includes("'AcceptedNewPrice'")
+          ? 'AcceptedNewPrice'
+          : 'PendingFarmerDecision';
+
+      await connection.execute(
+        `UPDATE failure_alternative_requests
+         SET status = ?,
+             final_price_per_kg = ?,
+             decision_notes = ?,
+             updated_at = NOW()
+         WHERE id = ?`,
+        [fallbackStatus, finalPrice, notes || '', alternative.id]
+      );
+    }
+
+    await connection.commit();
+    return success(res, { message: 'Alternative request published to all dealers for 1 hour.' });
+  } catch (err) {
+    await connection.rollback();
+    error(res, 'Failed to process farmer decision.', 500);
+  } finally {
+    connection.release();
+  }
+});
+
+router.patch('/alternatives/:id/accept', auth(['dealer']), async (req, res) => {
+  const connection = await pool.getConnection();
+  try {
+    await expireStalePublishedAlternatives();
+    await connection.beginTransaction();
+
+    const [altRows] = await connection.execute(
+      'SELECT * FROM failure_alternative_requests WHERE id = ? FOR UPDATE',
+      [req.params.id]
+    );
+
+    if (!altRows.length) {
+      await connection.rollback();
+      return error(res, 'Alternative request not found.', 404);
+    }
+
+    const alternative = altRows[0];
+    if (!['PublishedToDealers', 'AcceptedNewPrice'].includes(String(alternative.status || ''))) {
+      await connection.rollback();
+      return error(res, 'Alternative request is no longer available to claim.', 409);
+    }
+
+    const isLegacyPublished = String(alternative.status || '') === 'AcceptedNewPrice';
+    const hasExplicitExpiry = Boolean(alternative.expires_at);
+    if (isLegacyPublished || !hasExplicitExpiry) {
+      const fallbackWindowSource = alternative.updated_at || alternative.created_at;
+      const fallbackWindowExpiresAt = fallbackWindowSource
+        ? new Date(new Date(fallbackWindowSource).getTime() + DEALER_ALTERNATIVE_WINDOW_HOURS * 60 * 60 * 1000)
+        : null;
+
+      if (!fallbackWindowExpiresAt || fallbackWindowExpiresAt.getTime() <= Date.now()) {
+        await connection.rollback();
+        return error(res, 'Alternative request has expired.', 410);
       }
     }
 
-    const [newTransportResult] = await connection.execute(
+    if (!isLegacyPublished && hasExplicitExpiry && new Date(alternative.expires_at).getTime() <= Date.now()) {
+      await connection.rollback();
+      await expireStalePublishedAlternatives();
+      return error(res, 'Alternative request has expired.', 410);
+    }
+
+    const [dealerRows] = await connection.execute(
+      'SELECT id, name, phone, location FROM users WHERE id = ? AND role = ? LIMIT 1',
+      [req.user.id, 'dealer']
+    );
+    if (!dealerRows.length) {
+      await connection.rollback();
+      return error(res, 'Dealer profile not found.', 404);
+    }
+    const dealer = dealerRows[0];
+
+    const [transportResult] = await connection.execute(
       `INSERT INTO transport_requests (
          farmer_id, farmer_name, product_id, produce_name, contact_phone,
          dealer_id, dealer_name, dealer_phone, dealer_location,
@@ -426,54 +661,262 @@ router.patch('/alternatives/:id/decision', auth(['farmer']), async (req, res) =>
         alternative.product_id || null,
         alternative.fruit_type || alternative.produce_name,
         '',
-        alternative.dealer_id || null,
-        alternative.dealer_name || '',
-        alternative.dealer_phone || '',
-        alternative.preferred_dealer_location || alternative.dealer_location || '',
+        dealer.id,
+        dealer.name,
+        dealer.phone || '',
+        dealer.location || '',
         alternative.current_location,
         alternative.preferred_dealer_location,
         alternative.pickup_date || null,
         String(alternative.quantity),
-        `Alternative request after failure #${alternative.failure_id}${notes ? ` | ${notes}` : ''}`,
+        `Dealer accepted alternative #${alternative.id}`,
       ]
     );
 
     if (alternative.product_id) {
+      if (alternative.source_deal_id) {
+        const [sourceDealRows] = await connection.execute(
+          'SELECT id, dealer_id, status FROM deals WHERE id = ? LIMIT 1',
+          [alternative.source_deal_id]
+        );
+
+        if (sourceDealRows.length && Number(sourceDealRows[0].dealer_id) === Number(dealer.id)) {
+          const [sourceUpdateResult] = await connection.execute(
+            `UPDATE deals
+             SET status = 'Accepted',
+                 produce_name = ?,
+                 quantity_requested = ?,
+                 offered_price_per_kg = ?,
+                 message = ?,
+                 responded_at = NOW(),
+                 updated_at = NOW()
+             WHERE id = ? AND status = 'Accepted'`,
+            [
+              alternative.fruit_type || alternative.produce_name,
+              String(alternative.quantity),
+              alternative.final_price_per_kg,
+              'Accepted from alternative dealer window after transport failure.',
+              alternative.source_deal_id,
+            ]
+          );
+
+          if (!Number(sourceUpdateResult?.affectedRows || 0)) {
+            await connection.execute(
+              `INSERT INTO deals (
+                 dealer_id, dealer_name, farmer_id, farmer_name, product_id, produce_name,
+                 quantity_requested, offered_price_per_kg, message, status, responded_at
+               )
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'Accepted', NOW())`,
+              [
+                dealer.id,
+                dealer.name,
+                alternative.farmer_id,
+                alternative.farmer_name,
+                alternative.product_id,
+                alternative.fruit_type || alternative.produce_name,
+                String(alternative.quantity),
+                alternative.final_price_per_kg,
+                'Accepted from alternative dealer window after transport failure.',
+              ]
+            );
+          }
+        } else {
+          if (sourceDealRows.length && String(sourceDealRows[0].status || '').toLowerCase() === 'accepted') {
+            await connection.execute(
+              `UPDATE deals
+               SET status = 'Cancelled', updated_at = NOW()
+               WHERE id = ?`,
+              [alternative.source_deal_id]
+            );
+          }
+
+          await connection.execute(
+            `INSERT INTO deals (
+               dealer_id, dealer_name, farmer_id, farmer_name, product_id, produce_name,
+               quantity_requested, offered_price_per_kg, message, status, responded_at
+             )
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'Accepted', NOW())`,
+            [
+              dealer.id,
+              dealer.name,
+              alternative.farmer_id,
+              alternative.farmer_name,
+              alternative.product_id,
+              alternative.fruit_type || alternative.produce_name,
+              String(alternative.quantity),
+              alternative.final_price_per_kg,
+              'Accepted from alternative dealer window after transport failure.',
+            ]
+          );
+        }
+      } else if (alternative.dealer_id && Number(alternative.dealer_id) !== Number(dealer.id)) {
+        await connection.execute(
+          `UPDATE deals
+           SET status = 'Cancelled', updated_at = NOW()
+           WHERE id = (
+             SELECT id FROM (
+               SELECT id
+               FROM deals
+               WHERE product_id = ?
+                 AND farmer_id = ?
+                 AND dealer_id = ?
+                 AND status = 'Accepted'
+                 AND created_at <= COALESCE(?, NOW())
+               ORDER BY responded_at DESC, created_at DESC
+               LIMIT 1
+             ) x
+           )`,
+          [alternative.product_id, alternative.farmer_id, alternative.dealer_id, alternative.created_at || null]
+        );
+
+        await connection.execute(
+          `INSERT INTO deals (
+             dealer_id, dealer_name, farmer_id, farmer_name, product_id, produce_name,
+             quantity_requested, offered_price_per_kg, message, status, responded_at
+           )
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'Accepted', NOW())`,
+          [
+            dealer.id,
+            dealer.name,
+            alternative.farmer_id,
+            alternative.farmer_name,
+            alternative.product_id,
+            alternative.fruit_type || alternative.produce_name,
+            String(alternative.quantity),
+            alternative.final_price_per_kg,
+            'Accepted from alternative dealer window after transport failure.',
+          ]
+        );
+      } else if (alternative.dealer_id && Number(alternative.dealer_id) === Number(dealer.id)) {
+        const [sameDealerAcceptedRows] = await connection.execute(
+          `SELECT id
+           FROM deals
+           WHERE product_id = ? AND farmer_id = ? AND dealer_id = ? AND status = 'Accepted'
+           ORDER BY responded_at DESC, created_at DESC
+           LIMIT 1`,
+          [alternative.product_id, alternative.farmer_id, dealer.id]
+        );
+
+        if (sameDealerAcceptedRows.length) {
+          await connection.execute(
+            `UPDATE deals
+             SET produce_name = ?,
+                 quantity_requested = ?,
+                 offered_price_per_kg = ?,
+                 message = ?,
+                 responded_at = NOW(),
+                 updated_at = NOW()
+             WHERE id = ?`,
+            [
+              alternative.fruit_type || alternative.produce_name,
+              String(alternative.quantity),
+              alternative.final_price_per_kg,
+              'Accepted from alternative dealer window after transport failure.',
+              sameDealerAcceptedRows[0].id,
+            ]
+          );
+        } else {
+          await connection.execute(
+            `INSERT INTO deals (
+               dealer_id, dealer_name, farmer_id, farmer_name, product_id, produce_name,
+               quantity_requested, offered_price_per_kg, message, status, responded_at
+             )
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'Accepted', NOW())`,
+            [
+              dealer.id,
+              dealer.name,
+              alternative.farmer_id,
+              alternative.farmer_name,
+              alternative.product_id,
+              alternative.fruit_type || alternative.produce_name,
+              String(alternative.quantity),
+              alternative.final_price_per_kg,
+              'Accepted from alternative dealer window after transport failure.',
+            ]
+          );
+        }
+      } else {
+        await connection.execute(
+          `INSERT INTO deals (
+             dealer_id, dealer_name, farmer_id, farmer_name, product_id, produce_name,
+             quantity_requested, offered_price_per_kg, message, status, responded_at
+           )
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'Accepted', NOW())`,
+          [
+            dealer.id,
+            dealer.name,
+            alternative.farmer_id,
+            alternative.farmer_name,
+            alternative.product_id,
+            alternative.fruit_type || alternative.produce_name,
+            String(alternative.quantity),
+            alternative.final_price_per_kg,
+            'Accepted from alternative dealer window after transport failure.',
+          ]
+        );
+      }
+
+      await syncProduceInventoryFromAcceptedDeals(connection, alternative.product_id, alternative.farmer_id);
+    }
+
+    try {
       await connection.execute(
-        `UPDATE deals
-         SET offered_price_per_kg = ?, updated_at = NOW()
-         WHERE id = (
-           SELECT id FROM (
-             SELECT id
-             FROM deals
-             WHERE product_id = ? AND farmer_id = ? AND status = 'Accepted'
-               AND (? IS NULL OR dealer_id = ?)
-             ORDER BY responded_at DESC, created_at DESC
-             LIMIT 1
-           ) x
-         )`,
-        [finalPrice, alternative.product_id, alternative.farmer_id, alternative.dealer_id, alternative.dealer_id]
+        `UPDATE failure_alternative_requests
+         SET status = 'ClaimedByDealer',
+             claimed_dealer_id = ?,
+             claimed_dealer_name = ?,
+             claimed_at = NOW(),
+             dealer_id = ?,
+             dealer_name = ?,
+             dealer_phone = ?,
+             dealer_location = ?,
+             generated_transport_request_id = ?,
+             updated_at = NOW()
+         WHERE id = ?`,
+        [
+          dealer.id,
+          dealer.name,
+          dealer.id,
+          dealer.name,
+          dealer.phone || '',
+          dealer.location || '',
+          transportResult.insertId,
+          alternative.id,
+        ]
+      );
+    } catch (claimErr) {
+      if (!isAlternativeFallbackError(claimErr)) throw claimErr;
+
+      const enumType = await readAlternativeStatusEnum(connection);
+      const fallbackStatus = enumType.includes("'ClaimedByDealer'") ? 'ClaimedByDealer' : 'AcceptedNewPrice';
+
+      await connection.execute(
+        `UPDATE failure_alternative_requests
+         SET status = ?,
+             dealer_id = ?,
+             dealer_name = ?,
+             dealer_phone = ?,
+             dealer_location = ?,
+             generated_transport_request_id = ?,
+             updated_at = NOW()
+         WHERE id = ?`,
+        [
+          fallbackStatus,
+          dealer.id,
+          dealer.name,
+          dealer.phone || '',
+          dealer.location || '',
+          transportResult.insertId,
+          alternative.id,
+        ]
       );
     }
 
-    await connection.execute(
-      `UPDATE failure_alternative_requests
-       SET status = ?, final_price_per_kg = ?, generated_transport_request_id = ?, decision_notes = ?, updated_at = NOW()
-       WHERE id = ?`,
-      [
-        'AcceptedNewPrice',
-        finalPrice,
-        newTransportResult.insertId,
-        notes || '',
-        alternative.id,
-      ]
-    );
-
     await connection.commit();
-    return success(res, { message: 'Alternative request accepted and rerouted.' });
+    return success(res, { message: 'Alternative request accepted. Transport request created.' });
   } catch (err) {
     await connection.rollback();
-    error(res, 'Failed to process farmer decision.', 500);
+    return error(res, 'Failed to accept alternative request.', 500);
   } finally {
     connection.release();
   }

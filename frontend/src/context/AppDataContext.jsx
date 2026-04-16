@@ -5,7 +5,7 @@ import { getUsers } from '../api/users';
 import { getProduce, addProduce, deleteProduce as apiDeleteProduce, updateProduceStatus } from '../api/produce';
 import { getTransport, createTransport, updateTransportStatus } from '../api/transport';
 import { getDeals, createDeal, respondDeal } from '../api/deals';
-import { getFailures, reportFailure, getFailureAlternatives, createFailureAlternative, decideFailureAlternative } from '../api/failures';
+import { getFailures, reportFailure, getFailureAlternatives, createFailureAlternative, decideFailureAlternative, acceptFailureAlternative } from '../api/failures';
 import { getProposals, createProposal as apiCreateProposal, updateProposal as apiUpdateProposal } from '../api/proposals';
 
 const AppDataContext = createContext(null);
@@ -256,6 +256,11 @@ export function AppDataProvider({ children }) {
     await loadAllData();
   };
 
+  const acceptAlternativeRequest = async (alternativeId) => {
+    await acceptFailureAlternative(alternativeId);
+    await loadAllData();
+  };
+
   const addProposal = async (proposal) => {
     const payload = {
       current_location: proposal.currentLocation,
@@ -300,6 +305,7 @@ export function AppDataProvider({ children }) {
       addFailure,
       addAlternativeRequest,
       decideAlternativeRequest,
+      acceptAlternativeRequest,
       addProposal,
       updateProposal,
     }}>

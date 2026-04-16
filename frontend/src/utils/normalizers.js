@@ -115,6 +115,22 @@ export const normFail = (f) => ({
   reportedAt: f.reported_at || f.created_at || f.reportedAt,
 });
 
+function resolveAlternativeExpiresAt(record) {
+  const rawStatus = String(record.status || 'PendingFarmerDecision').toLowerCase();
+  const explicitExpires = record.expires_at || record.expiresAt || null;
+  if (explicitExpires) return explicitExpires;
+
+  if (!['acceptednewprice', 'publishedtodealers'].includes(rawStatus)) return null;
+
+  const baseTimestamp = record.updated_at || record.updatedAt || record.created_at || record.createdAt || null;
+  if (!baseTimestamp) return null;
+
+  const parsedBase = new Date(baseTimestamp);
+  if (Number.isNaN(parsedBase.getTime())) return null;
+
+  return new Date(parsedBase.getTime() + 60 * 60 * 1000).toISOString();
+}
+
 export const normAlternative = (a) => ({
   id: a.id,
   failureId: a.failure_id,
@@ -138,6 +154,11 @@ export const normAlternative = (a) => ({
   requestedPricePerKg: a.requested_price_per_kg === null || a.requested_price_per_kg === undefined ? null : Number(a.requested_price_per_kg),
   proposedPricePerKg: a.proposed_price_per_kg === null || a.proposed_price_per_kg === undefined ? null : Number(a.proposed_price_per_kg),
   finalPricePerKg: a.final_price_per_kg === null || a.final_price_per_kg === undefined ? null : Number(a.final_price_per_kg),
+  publishedAt: a.published_at || a.publishedAt || null,
+  expiresAt: resolveAlternativeExpiresAt(a),
+  claimedDealerId: a.claimed_dealer_id || null,
+  claimedDealerName: a.claimed_dealer_name || '',
+  claimedAt: a.claimed_at || a.claimedAt || null,
   decisionNotes: a.decision_notes || '',
   status: String(a.status || 'PendingFarmerDecision').toLowerCase(),
   createdAt: a.created_at || a.createdAt,

@@ -25,12 +25,21 @@ export default function TransportRequests() {
   });
 
   const myRequests = transport.filter((t) => t.farmerId === user?.id);
-  const availableProduce = products.filter(
-    (p) => p.farmerId === user?.id && p.status !== 'sold' && (p.availableQuantity ?? p.quantity) > 0
-  );
   const acceptedDeals = deals
     .filter((d) => d.farmerId === user?.id && d.status === 'accepted')
     .sort((a, b) => new Date(b.respondedAt || b.createdAt || 0).getTime() - new Date(a.respondedAt || a.createdAt || 0).getTime());
+  const acceptedDealsByProductId = acceptedDeals.reduce((acc, deal) => {
+    const key = Number(deal.produceId);
+    if (!key) return acc;
+    if (!acc[key]) acc[key] = deal;
+    return acc;
+  }, {});
+  const availableProduce = products.filter((p) => {
+    if (p.farmerId !== user?.id) return false;
+    const hasAcceptedBooking = Boolean(acceptedDealsByProductId[Number(p.id)]);
+    if (hasAcceptedBooking) return true;
+    return p.status !== 'sold' && (p.availableQuantity ?? p.quantity) > 0;
+  });
 
   const handleProduceChange = (produceId) => {
     const selectedProduce = products.find((p) => p.id === Number(produceId));
@@ -47,6 +56,11 @@ export default function TransportRequests() {
     }));
   };
 
+  const getBookedQuantityForProduce = (produceId) => {
+    const matchedDeal = acceptedDealsByProductId[Number(produceId)];
+    return matchedDeal ? Number(matchedDeal.quantity || 0) : null;
+  };
+
   const handleSubmit = async () => {
     if (!form.produceId || !form.fromLocation || !form.toLocation || !form.contactPhone || !form.dealerName) {
       toast.error('Please fill all required fields');
@@ -57,6 +71,8 @@ export default function TransportRequests() {
       toast.error('Selected produce is no longer available');
       return;
     }
+
+    const bookedQuantity = getBookedQuantityForProduce(form.produceId);
 
     try {
       await addTransport({
@@ -71,7 +87,7 @@ export default function TransportRequests() {
         dealerLocation: form.dealerLocation,
         fromLocation: form.fromLocation,
         toLocation: form.toLocation,
-        quantity: produce.availableQuantity ?? produce.quantity,
+        quantity: bookedQuantity || produce.availableQuantity || produce.quantity,
         description: form.description,
       });
       toast.success('Transport request created');
@@ -199,7 +215,11 @@ export default function TransportRequests() {
               <option value="">Select...</option>
               {availableProduce.map((p) => (
                 <option key={p.id} value={p.id}>
-                  {p.name} - {p.availableQuantity ?? p.quantity}{p.unit}
+                  {(() => {
+                    const bookedQty = getBookedQuantityForProduce(p.id);
+                    if (bookedQty) return `${p.name} - booked ${bookedQty}${p.unit}`;
+                    return `${p.name} - ${p.availableQuantity ?? p.quantity}${p.unit}`;
+                  })()}
                 </option>
               ))}
             </select>
